@@ -61,7 +61,11 @@ jobs:
           set -e
           SHA=$(git rev-parse --short=8 HEAD)
           OUT="ironcalc-wasm-${SHA}.tgz"
-          tar -czf "$OUT" -C pkg wasm.js wasm.d.ts wasm_bg.wasm wasm_bg.wasm.d.ts package.json
+          # Deterministic archive (fixed order/mtime/owner, gzip without a timestamp)
+          # so re-building the same ref yields the same bytes and sha256.
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -C pkg -cf - wasm.js wasm.d.ts wasm_bg.wasm wasm_bg.wasm.d.ts package.json \
+            | gzip -n > "$OUT"
           SUM=$(sha256sum "$OUT" | cut -d' ' -f1)
           gh release upload "${{ inputs.release_tag }}" "$OUT" --clobber --repo "${{ github.repository }}"
           URL="https://github.com/${{ github.repository }}/releases/download/${{ inputs.release_tag }}/${OUT}"
