@@ -1,0 +1,77 @@
+# Builds the web @ironcalc/wasm bundle from a chosen ref and uploads it as a
+# release asset, so the myFASTEC frontend can download a prebuilt engine instead
+# of building Rust on its host. Replaces the manual local build. Run it from the
+# Actions tab ("Run workflow"), then copy the printed PIN / URL / sha256 into
+# myFASTEC's platform/frontend/vendor-ironcalc.mjs.
+name: Build engine WASM asset
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to build the engine from
+        required: true
+        default: spill-aggif-v091
+      release_tag:
+        description: Existing release tag to attach the asset to
+        required: true
+        default: v0.9.1-spill-aggif
+
+permissions:
+  contents: write # upload release assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Prebuilt wasm-pack (no cargo-install compile). It pulls the wasm32 target
+      # itself; ubuntu-latest already has rustup and a C toolchain for the host
+      # build scripts.
+      - name: Install wasm-pack
+        run: |
+          VER=v0.13.1
+          curl -sSL "https://github.com/rustwasm/wasm-pack/releases/download/${VER}/wasm-pack-${VER}-x86_64-unknown-linux-musl.tar.gz" | tar xz
+          echo "$PWD/wasm-pack-${VER}-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+
+      # Mirror the publishable build: wasm-pack, then prepend the generated
+      # types.js (BorderType/BorderStyle enums) to wasm.js via fix_types.py —
+      # without it the consuming UI fails to build ("BorderStyle is not exported").
+      - name: Build + post-process
+        working-directory: bindings/wasm
+        run: |
+          set -e
+          wasm-pack build --target web --scope ironcalc --release
+          npx -y -p typescript@5 tsc types.ts --target esnext --module esnext
+          python3 fix_types.py pkg
+          test "$(grep -c 'export var BorderStyle' pkg/wasm.js)" -ge 1
+
+      - name: Package + upload
+        working-directory: bindings/wasm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          SHA=$(git rev-parse --short=8 HEAD)
+          OUT="ironcalc-wasm-${SHA}.tgz"
+          tar -czf "$OUT" -C pkg wasm.js wasm.d.ts wasm_bg.wasm wasm_bg.wasm.d.ts package.json
+          SUM=$(sha256sum "$OUT" | cut -d' ' -f1)
+          gh release upload "${{ inputs.release_tag }}" "$OUT" --clobber --repo "${{ github.repository }}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ inputs.release_tag }}/${OUT}"
+          {
+            echo "## Engine asset built"
+            echo ""
+            echo "Copy these into \`platform/frontend/vendor-ironcalc.mjs\`:"
+            echo '```js'
+            echo "const PIN = \"${SHA}\";"
+            echo "const url = \"${URL}\";"
+            echo "const sha256 = \"${SUM}\";"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
